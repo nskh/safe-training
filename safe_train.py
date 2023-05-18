@@ -131,8 +131,12 @@ def propagate_interval(input_interval, model):
             if config["activation"] == "relu":
                 # intersect with [0, +inf] to clip like a relu
                 # TODO test this handling inside loop!!
-                for node_interval in current_interval:
-                    node_interval &= interval[0, inf]
+                # can't do a for-in here since that does a copy?
+                for interval_idx in range(len(current_interval)):
+                    current_interval[interval_idx] &= interval[0, inf]
+                    if current_interval[interval_idx] == interval():
+                        current_interval[interval_idx] = interval[0, 0]
+
             elif config["activation"] == "linear":
                 # everything OK, don't modify
                 pass
@@ -159,9 +163,12 @@ def plot_intervals(
     ax = fig.gca()
 
     input_width = input_interval[0].sup - input_interval[0].inf
-    output_width = output_interval[0][1] - output_interval[0][0]
+    if type(output_interval[0]) == interval:
+        output_width = output_interval[0][0].sup - output_interval[0][0].inf
+    elif type(output_interval[0]) == list:
+        output_width = output_interval[0][1] - output_interval[0][0]
     interval_rect = matplotlib.patches.Rectangle(
-        (input_interval[0].inf, output_interval[0][0]), input_width, output_width
+        (input_interval[0].inf, output_interval[0][0].inf), input_width, output_width
     )
     ax.add_collection(
         matplotlib.collections.PatchCollection(
@@ -187,3 +194,10 @@ def plot_intervals(
             legend.append("OLS")
         plt.legend(legend)
     plt.show()
+
+
+class SafeRegionLoss(tf.keras.losses.Loss):
+    """Mean squared loss plus a penalty for safe regions"""
+
+    def call(self, y_true, y_pred):
+        return tf.reduce_mean(tf.math.square(y_pred - y_true), axis=-1)
