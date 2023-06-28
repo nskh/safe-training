@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy
 from maraboupy import Marabou, MarabouUtils, MarabouCore
+import cvxpy as cp
+import itertools
 
 from interval import interval, inf
 
@@ -191,7 +193,7 @@ def propagate_interval(input_interval, model, graph=False, verbose=False):
             pass
         else:
             raise NotImplementedError(f"Layer type {config['name']} is not handled")
-    return current_interval, penultimate_interval
+    return current_interval, [penultimate_interval]
 
 
 def plot_intervals(
@@ -241,10 +243,13 @@ def plot_intervals(
     )
     if desired_interval is not None:
         out_rect = matplotlib.patches.Rectangle(
-            (-60, desired_interval[0].inf), 120, desired_interval[0].sup - desired_interval[0].inf)
+            (-60, desired_interval[0].inf),
+            120,
+            desired_interval[0].sup - desired_interval[0].inf,
+        )
         ax.add_collection(
             matplotlib.collections.PatchCollection(
-                [out_rect] , facecolor="r", alpha=0.1, edgecolor="r"
+                [out_rect], facecolor="r", alpha=0.1, edgecolor="r"
             )
         )
 
@@ -339,10 +344,10 @@ def safe_training_loop(input_interval, desired_interval, x, y, verbose=False):
         # network.setUpperBound(outputVars[0], desired_interval[0].sup)
 
         ineq1 = MarabouCore.Equation(MarabouCore.Equation.LE)
-        ineq1.addAddend(outputVars[0] , 1)
+        ineq1.addAddend(outputVars[0], 1)
 
         ineq2 = MarabouCore.Equation(MarabouCore.Equation.GE)
-        ineq2.addAddend(outputVars[0] , 4)
+        ineq2.addAddend(outputVars[0], 4)
 
         network.addDisjunctionConstraint([[ineq1], [ineq2]])
 
@@ -525,6 +530,8 @@ def projection_training_loop():
         output_interval, penultimate_interval = propagate_interval(
             input_interval, regression_model, graph=False
         )
+        if type(penultimate_interval) is not list:
+            penultimate_interval = [penultimate_interval]
         if type(output_interval) is list:
             if len(output_interval) == 1:
                 output_interval = output_interval[0]
@@ -544,10 +551,17 @@ def projection_training_loop():
                     penultimate_interval,
                     np.squeeze(np.array(weights)),
                 )
-                print(
-                    f"Projected weights: {projected_weights} yield new interval: "
-                    f"{penultimate_interval * projected_weights[0] + projected_weights[1]}"
-                )
+                if type(penultimate_interval) is list:
+                    print(
+                        f"Projected weights: {projected_weights} yield new interval: "
+                        f"{penultimate_interval[0] * projected_weights[0] + projected_weights[1]}"
+                    )
+                else:
+                    print(
+                        f"Projected weights: {projected_weights} yield new interval: "
+                        f"{penultimate_interval * projected_weights[0] + projected_weights[1]}"
+                    )
+
                 proj_weight, proj_bias = projected_weights
                 regression_model.layers[-1].set_weights(
                     [np.array([[proj_weight]]), np.array([proj_bias])]
@@ -615,8 +629,10 @@ def projection_training_loop_larger():
         optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         output_interval, penultimate_interval = propagate_interval(
-            input_interval, regression_model, graph=False
+            [input_interval], regression_model, graph=False
         )
+        if type(penultimate_interval) is not list:
+            penultimate_interval = [penultimate_interval]
         if type(output_interval) is list:
             if len(output_interval) == 1:
                 output_interval = output_interval[0]
@@ -636,10 +652,11 @@ def projection_training_loop_larger():
                     penultimate_interval,
                     np.squeeze(np.array(weights)),
                 )
-                print(
-                    f"Projected weights: {projected_weights} yield new interval: "
-                    f"{penultimate_interval * projected_weights[0] + projected_weights[1]}"
-                )
+                if type(penultimate_interval) is list:
+                    print(
+                        f"Projected weights: {projected_weights} yield new interval: "
+                        f"{penultimate_interval[0] * projected_weights[0] + projected_weights[1]}"
+                    )
                 proj_weight, proj_bias = projected_weights
                 regression_model.layers[-1].set_weights(
                     [np.array([[proj_weight]]), np.array([proj_bias])]
@@ -663,7 +680,34 @@ def projection_training_loop_multivariate():
     return None
 
 
-def project_weights(goal_interval, input_intervals, theta):
+def generate_constraints(input_intervals, goal_interval, x, verbose=False):
+    print(input_intervals)
+    interval_combinations = list(
+        itertools.product(*[(elem[0]) for elem in input_intervals])
+    )
+    constraint_vectors = [np.hstack([elem, 1]) for elem in interval_combinations]
+    constraints = []
+    if verbose:
+        print("Generating constraints:")
+    for constraint_vector in constraint_vectors:
+        constraints.append(constraint_vector @ x >= goal_interval[0][0])
+        constraints.append(constraint_vector @ x <= goal_interval[0][1])
+        if verbose:
+            print(f"{constraint_vector} @ x >= {goal_interval[0][0]}")
+            print(f"{constraint_vector} @ x <= {goal_interval[0][1]}")
+    return constraints
+
+
+def project_weights(goal_interval, input_intervals, theta, verbose=False):
+    x = cp.Variable(theta.shape)
+    constraints = generate_constraints(input_intervals, goal_interval, x, verbose)
+    obj = cp.Minimize(cp.norm(x - theta))
+    prob = cp.Problem(obj, constraints)
+    prob.solve()  # Returns the optimal value.
+    return x.value
+
+
+def project_weights_vector(goal_interval, input_intervals, theta, verbose=False):
     shift_lower = np.array([0, goal_interval[0].inf])
     print(f"input interval: {input_intervals}")
     direction_lower = np.array([1, -input_intervals[0].inf])
@@ -687,8 +731,10 @@ def project_weights(goal_interval, input_intervals, theta):
         [param_upper, param_lower], key=lambda param: np.linalg.norm(theta - param)
     )
 
+
 def main():
     print("I can't get a jupyter notebook to work so I'm just going to run this here")
+
 
 if __name__ == "__main__":
     main()
