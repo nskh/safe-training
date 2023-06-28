@@ -5,6 +5,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy
+from maraboupy import Marabou, MarabouUtils, MarabouCore
 
 from interval import interval, inf
 
@@ -74,13 +75,14 @@ def plot_predictions(model, xs, ys, xlim=[0, 60], ylim=[0, 60]):
     plt.show()
 
 
-def propagate_interval(input_interval, model, graph=False):
+def propagate_interval(input_interval, model, graph=False, verbose=False):
     # TODO check relu handling for multiple intervals
     # TODO change inputs to lists?
 
     # Complain if input_interval is not a list
     if type(input_interval) is not list:
-        print("Warning! Input interval was not a list")
+        if verbose:
+            print("Warning! Input interval was not a list")
 
     num_layers = len(model.layers)
     current_interval = input_interval
@@ -201,6 +203,7 @@ def plot_intervals(
     y_scipy=None,
     xlim=[0, 60],
     ylim=[0, 60],
+    desired_interval=None,
 ):
     fig = plt.figure()
     ax = fig.gca()
@@ -236,6 +239,14 @@ def plot_intervals(
             [interval_rect], facecolor="k", alpha=0.1, edgecolor="k"
         )
     )
+    if desired_interval is not None:
+        out_rect = matplotlib.patches.Rectangle(
+            (-60, desired_interval[0].inf), 120, desired_interval[0].sup - desired_interval[0].inf)
+        ax.add_collection(
+            matplotlib.collections.PatchCollection(
+                [out_rect] , facecolor="r", alpha=0.1, edgecolor="r"
+            )
+        )
 
     plt.show()
 
@@ -247,9 +258,7 @@ class SafeRegionLoss(tf.keras.losses.Loss):
         return tf.reduce_mean(tf.math.square(y_pred - y_true), axis=-1)
 
 
-def safe_training_loop():
-    x, y = generate_data()
-
+def safe_training_loop(input_interval, desired_interval, x, y, verbose=False):
     normalizer = layers.Normalization(
         input_shape=[
             1,
@@ -262,7 +271,6 @@ def safe_training_loop():
     # outputs = layers.Dense(units=1)(layers.Dense(units=1)(normalizer(inputs)))
     # input -> dense1
     outputs = layers.Dense(units=1)(inputs)
-    input_interval, desired_interval = interval[20, 40], interval[10, 30]
     EXPLORATION_BUDGET = 10
     regression_model = tf.keras.Model(inputs, outputs)
     regression_model.compile(
@@ -277,12 +285,15 @@ def safe_training_loop():
     last_safe_epoch = 0
     num_unsafe_epochs = 0
 
-    epochs = 40
+    epochs = 10
     for epoch in range(epochs):
-        print(f"\nStart of epoch {epoch}")
+        if verbose:
+            print("*" * 20)
+            print(f"\nStart of epoch {epoch}")
 
         with tf.GradientTape() as tape:
             y_pred = regression_model(x, training=True)  # Forward pass
+            y_pred = tf.squeeze(y_pred)
             # Compute the loss value
             # (the loss function is configured in `compile()`)
             loss = loss_fn(y, y_pred)
@@ -300,27 +311,69 @@ def safe_training_loop():
         output_interval, _ = propagate_interval(
             input_interval, regression_model, graph=False
         )
+        print(input_interval)
+        print(output_interval)
         if type(output_interval) is list:
             if len(output_interval) == 1:
                 output_interval = output_interval[0]
             else:
                 raise NotImplementedError("Output interval was interval of length > 1")
+
+        print("With Marabou:\n")
+        tf.saved_model.save(regression_model, "tmp")
+        network = Marabou.read_tf("tmp", modelType="savedModel_v2")
+        inputVars = network.inputVars[0][0]
+        outputVars = network.outputVars[0][0]
+
+        print("adding constraints")
+        print(inputVars[0], ">", input_interval[0].inf)
+        network.setLowerBound(inputVars[0], input_interval[0].inf)
+
+        print(inputVars[0], "<", input_interval[0].sup)
+        network.setUpperBound(inputVars[0], input_interval[0].sup)
+
+        print(outputVars[0], ">", desired_interval[0].inf)
+        print(outputVars[0], "<", desired_interval[0].sup)
+
+        # network.setLowerBound(outputVars[0], desired_interval[0].inf)
+        # network.setUpperBound(outputVars[0], desired_interval[0].sup)
+
+        ineq1 = MarabouCore.Equation(MarabouCore.Equation.LE)
+        ineq1.addAddend(outputVars[0] , 1)
+
+        ineq2 = MarabouCore.Equation(MarabouCore.Equation.GE)
+        ineq2.addAddend(outputVars[0] , 4)
+
+        network.addDisjunctionConstraint([[ineq1], [ineq2]])
+
+        _, vals, stats = network.solve("marabou.log")
+        if vals is None:
+            print("UNSAT, so we are safe?")
+        else:
+            print(f"vals are {vals}")
+
+        print("\n\nWithout:\n")
         if output_interval not in desired_interval:
-            print(f"safe region test FAILED, interval was {output_interval}")
-            print(regression_model.layers[-1].weights)
+            if verbose:
+                print(f"safe region test FAILED, interval was {output_interval}")
+                print(regression_model.layers[-1].weights)
+                print("output interval", output_interval)
             num_unsafe_epochs += 1
         else:
-            print(f"safe region test passed, interval was {output_interval}")
+            if verbose:
+                print(f"safe region test passed, interval was {output_interval}")
+                print("output interval", output_interval)
             last_safe_weights = regression_model.get_weights()
             last_safe_epoch = epoch
             num_unsafe_epochs = 0
 
         if num_unsafe_epochs == EXPLORATION_BUDGET:
-            print(
-                f"Restarting training from last known safe set of weights, "
-                f"as unsafe epoch tolerance {EXPLORATION_BUDGET} was reached. "
-                f"Weights are {last_safe_weights}"
-            )
+            if verbose:
+                print(
+                    f"Restarting training from last known safe set of weights, "
+                    f"as unsafe epoch tolerance {EXPLORATION_BUDGET} was reached. "
+                    f"Weights are {last_safe_weights}"
+                )
             regression_model.set_weights(last_safe_weights)
         else:
             # Update metrics (includes the metric that tracks the loss)
@@ -633,3 +686,9 @@ def project_weights(goal_interval, input_intervals, theta):
     return min(
         [param_upper, param_lower], key=lambda param: np.linalg.norm(theta - param)
     )
+
+def main():
+    print("I can't get a jupyter notebook to work so I'm just going to run this here")
+
+if __name__ == "__main__":
+    main()
