@@ -290,7 +290,7 @@ def safe_training_loop(input_interval, desired_interval, x, y, verbose=False):
     last_safe_epoch = 0
     num_unsafe_epochs = 0
 
-    epochs = 10
+    epochs = 40
     for epoch in range(epochs):
         if verbose:
             print("*" * 20)
@@ -345,11 +345,13 @@ def safe_training_loop(input_interval, desired_interval, x, y, verbose=False):
 
         ineq1 = MarabouCore.Equation(MarabouCore.Equation.LE)
         ineq1.addAddend(outputVars[0], 1)
+        ineq1.setScalar(1.0)
 
         ineq2 = MarabouCore.Equation(MarabouCore.Equation.GE)
-        ineq2.addAddend(outputVars[0], 4)
-
-        network.addDisjunctionConstraint([[ineq1], [ineq2]])
+        ineq2.addAddend(outputVars[0], 1)
+        ineq2.setScalar(4.0)
+        disjunction = [[ineq1], [ineq2]]
+        network.addDisjunctionConstraint(disjunction)
 
         _, vals, stats = network.solve("marabou.log")
         if vals is None:
