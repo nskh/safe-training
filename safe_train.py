@@ -167,7 +167,9 @@ def propagate_interval(input_interval, model, graph=False, verbose=False):
             pass
         else:
             raise NotImplementedError(f"Layer type {config['name']} is not handled")
-    return current_interval, [penultimate_interval]
+    if type(penultimate_interval) is not list:
+        penultimate_interval = [penultimate_interval]
+    return current_interval, penultimate_interval
 
 
 def plot_intervals(
@@ -237,14 +239,24 @@ class SafeRegionLoss(tf.keras.losses.Loss):
         return tf.reduce_mean(tf.math.square(y_pred - y_true), axis=-1)
 
 
-def generate_constraints(input_intervals, goal_interval, x, verbose=False):
-    print(input_intervals)
-    interval_combinations = list(
-        itertools.product(*[(elem[0]) for elem in input_intervals])
-    )
+def generate_constraints(input_intervals, goal_interval, x, theta, verbose=False):
+    lowers = []
+    uppers = []
+    for i, ivl in enumerate(input_intervals):
+        if theta[i] < 0:
+            # if weight is negative
+            # swap order of interval bounds used in constraints
+            lowers.append(ivl[0][1])
+            uppers.append(ivl[0][0])
+        else:
+            lowers.append(ivl[0][0])
+            uppers.append(ivl[0][1])
+
+    interval_combinations = [lowers, uppers]
     constraint_vectors = [np.hstack([elem, 1]) for elem in interval_combinations]
     constraints = []
     if verbose:
+        print(f"Generated {len(constraint_vectors)} constraint orderings")
         print("Generating constraints:")
     for constraint_vector in constraint_vectors:
         constraints.append(constraint_vector @ x >= goal_interval[0][0])
@@ -252,12 +264,25 @@ def generate_constraints(input_intervals, goal_interval, x, verbose=False):
         if verbose:
             print(f"{constraint_vector} @ x >= {goal_interval[0][0]}")
             print(f"{constraint_vector} @ x <= {goal_interval[0][1]}")
+
+    for i in range(len(theta) - 1):
+        constraint_row = np.zeros(theta.shape)
+        np.put(constraint_row, i, 1)
+        if theta[i] >= 0:
+            # enforce weight stays positive during optimization
+            constraints.append(constraint_row @ x >= 0)
+        else:
+            # enforce weight stays negative optimization
+            constraints.append(constraint_row @ x <= 0)
+
     return constraints
 
 
 def project_weights(goal_interval, input_intervals, theta, verbose=False):
     x = cp.Variable(theta.shape)
-    constraints = generate_constraints(input_intervals, goal_interval, x, verbose)
+    constraints = generate_constraints(
+        input_intervals, goal_interval, x, theta, verbose
+    )
     obj = cp.Minimize(cp.norm(x - theta))
     prob = cp.Problem(obj, constraints)
     prob.solve()  # Returns the optimal value.
@@ -287,3 +312,18 @@ def project_weights_vector(goal_interval, input_intervals, theta, verbose=False)
     return min(
         [param_upper, param_lower], key=lambda param: np.linalg.norm(theta - param)
     )
+
+
+def check_intervals(output_interval, goal_interval):
+    assert type(output_interval) == type(goal_interval)
+    if type(output_interval) is list:
+        assert len(output_interval) == len(goal_interval)
+        for i in range(len(output_interval)):
+            if (
+                goal_interval[i] is not None
+                and output_interval[i] not in goal_interval[i]
+            ):
+                return False
+        return True
+    else:
+        return output_interval in goal_interval
