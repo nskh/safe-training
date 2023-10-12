@@ -11,7 +11,33 @@ import itertools
 
 from interval import interval, inf
 
+import matplotlib.pyplot as plt
+
 # from safe_model import SafeModel
+
+# Constants
+ra1 = (0.9, 0.9, 0.9)  # white
+ra2 = (0.0, 1.0, 1.0)  # cyan
+ra3 = (144.0 / 255.0, 238.0 / 255.0, 144.0 / 255.0)  # lightgreen
+ra4 = (30.0 / 255.0, 144.0 / 255.0, 1.0)  # dodgerblue
+ra5 = (0.0, 1.0, 0.0)  # lime
+ra6 = (0.0, 0.0, 1.0)  # blue
+ra7 = (34.0 / 255.0, 139.0 / 255.0, 34.0 / 255.0)  # forestgreen
+ra8 = (0.0, 0.0, 128.0 / 255.0)  # navy
+ra9 = (0.0, 100.0 / 255.0, 0.0)  # darkgreen
+colors = [ra1, ra2, ra3, ra4, ra5, ra6, ra7, ra8, ra9]
+bg_colors = [(1.0, 1.0, 1.0)]
+action_names = [
+    "COC",
+    "DNC",
+    "DND",
+    "DES1500",
+    "CL1500",
+    "SDES1500",
+    "SCL1500",
+    "SDES2500",
+    "SCL2500",
+]
 
 
 def generate_data(NOISE_STD=2, M=0.5, B=5, xmin=5, xmax=55, n=30):
@@ -278,11 +304,24 @@ def generate_constraints(input_intervals, goal_interval, x, theta, verbose=False
     return constraints
 
 
-def project_weights(goal_interval, input_intervals, theta, verbose=False):
+def project_weights(
+    goal_interval, input_intervals, theta, verbose=False, multiple_intervals=False
+):
     x = cp.Variable(theta.shape)
-    constraints = generate_constraints(
-        input_intervals, goal_interval, x, theta, verbose
-    )
+    constraints = []
+    if multiple_intervals:
+        for goal_interval_single in goal_interval:
+            print(goal_interval_single[0])
+            print(goal_interval_single[0][0][0])
+            print(goal_interval_single[0][0][1])
+            these_constraints = generate_constraints(
+                input_intervals, goal_interval_single[0], x, theta, verbose
+            )
+        constraints += these_constraints
+    else:
+        constraints = generate_constraints(
+            input_intervals, goal_interval_single, x, theta, verbose
+        )
     obj = cp.Minimize(cp.norm(x - theta))
     prob = cp.Problem(obj, constraints)
     prob.solve()  # Returns the optimal value.
@@ -327,3 +366,83 @@ def check_intervals(output_interval, goal_interval):
         return True
     else:
         return output_interval in goal_interval
+
+
+def plot_policy(model, filename=None, zoom=False, vo=0, vi=0, use_sisl_colors=False):
+    x_grid = None
+    taus = np.linspace(0, 40, 81)
+    hs = np.hstack(
+        [
+            np.linspace(-5000, -2000, 20),
+            np.linspace(-2000, 2000, 40),
+            np.linspace(2000, 5000, 20),
+        ]
+    )
+    for tau in taus:
+        grid_component = np.vstack(
+            [
+                hs,
+                np.ones(hs.shape) * vo,
+                np.ones(hs.shape) * vi,
+                np.ones(hs.shape) * tau,
+            ]
+        ).T
+        if x_grid is not None:
+            x_grid = np.vstack([x_grid, grid_component])
+        else:
+            x_grid = grid_component
+
+    y_pred = model.predict(x_grid)
+    advisory_idxs = np.argmax(y_pred, axis=1)
+
+    # dict indexed by color/advisory of all points
+    xs = {0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [], 8: [], 9: []}
+    ys = {0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [], 8: [], 9: []}
+
+    for i, advisory_idx in enumerate(advisory_idxs):
+        scatter_x = x_grid[i, 3]  # tau
+        scatter_y = x_grid[i, 0]  # h
+        xs[advisory_idx].append(scatter_x)
+        ys[advisory_idx].append(scatter_y)
+
+    plt.figure()
+    plt.tight_layout()
+    for i in range(len(colors)):
+        if use_sisl_colors:
+            plt.scatter(xs[i], ys[i], s=10, c=[colors[i]])
+        else:
+            plt.scatter(xs[i], ys[i], s=10)
+    plt.legend(action_names)
+    plt.xlabel("Tau (sec)")
+    plt.ylabel("h (ft)")
+    plt.title(f"Policy for vo:{vo} and vi:{vi}")
+    if filename is None:
+        plt.savefig(f"viz_policy_vo{vo}_vi{vi}.pdf")
+    else:
+        if filename[-4:] == ".pdf":
+            plt.savefig(filename)
+        else:
+            plt.savefig(filename + ".pdf")
+    plt.show()
+
+    if zoom:
+        plt.figure()
+        plt.tight_layout()
+        for i in range(len(colors)):
+            if use_sisl_colors:
+                plt.scatter(xs[i], ys[i], s=10, c=[colors[i]])
+            else:
+                plt.scatter(xs[i], ys[i], s=10)
+        plt.legend(action_names)
+        plt.xlabel("Tau (sec)")
+        plt.ylabel("h (ft)")
+        plt.title(f"Policy for vo:{vo} and vi:{vi}")
+        plt.ylim([-2100, 2100])
+        if filename is None:
+            plt.savefig(f"viz_policy_vo{vo}_vi{vi}_zoomed.pdf")
+        else:
+            if filename[-4:] == ".pdf":
+                plt.savefig(filename[:-4] + "_zoomed.pdf")
+            else:
+                plt.savefig(filename + "_zoomed.pdf")
+        plt.show()
